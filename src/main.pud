@@ -1,0 +1,108 @@
+import agents
+import std.env
+import std.fs
+
+const SOURCE: Str = "skills/puddi/SKILL.md"
+
+fn usage() {
+    print("Usage: pud run -- [--dry-run] [--agent ID]")
+    print("Agent IDs: codex, claude, cursor, gemini, opencode, copilot")
+}
+
+fn apply(agent: agents.Agent, skill: Str, preview: Bool) -> Result<Str, Str> {
+    let dir = agents.join(agent.skills, "puddi")
+    let file = agents.join(dir, "SKILL.md")
+    let entries = match fs.list_dir(agent.skills) {
+        Ok(names) -> names
+        Err(fs.IoErr.NotFound(_)) -> []
+        Err(e) -> return Err("cannot inspect {agent.skills}: {e}")
+    }
+
+    // Use the parent listing so a dangling symlink also occupies the name.
+    if fs.exists(dir) || entries.contains("puddi") {
+        if fs.is_dir(dir) && !fs.is_dir(file) {
+            if let Ok(current) = fs.read(file) {
+                if current.replace("\r\n", "\n") == skill { return Ok("already installed at {file}") }
+            }
+        }
+        return Err("existing path preserved at {dir}")
+    }
+    if preview { return Ok("would install at {file}") }
+
+    if let Err(e) = fs.create_dir(dir) {
+        return Err("cannot create {dir}: {e}")
+    }
+    if let Err(e) = fs.write(file, skill) {
+        return Err("cannot write {file}: {e}")
+    }
+    // The WASI text writer can report success after a stream write failure.
+    match fs.read(file) {
+        Ok(saved) if saved == skill -> Ok("installed at {file}")
+        _ -> Err("could not verify the skill at {file}")
+    }
+}
+
+fn main() {
+    let args = env.args()
+    var preview = false
+    var requested: Option<Str> = None
+    var i = 1
+    while i < args.len() {
+        match args[i] {
+            "--help" | "-h" -> { usage(); return }
+            "--dry-run" -> { preview = true }
+            "--agent" if requested == None && i + 1 < args.len() -> {
+                i += 1
+                requested = Some(args[i])
+            }
+            arg -> {
+                eprint("Invalid argument: {arg}")
+                usage()
+                env.exit(2)
+            }
+        }
+        i += 1
+    }
+
+    let Some((home, windows)) = agents.home_directory() else {
+        eprint("Set HOME or USERPROFILE to an absolute user directory")
+        env.exit(1)
+    }
+    let selected = agents.discover(home, windows).filter(|a| match requested {
+            Some(id) -> a.id == id
+            None -> a.detected
+    })
+    if selected.is_empty() {
+        if let Some(id) = requested {
+            eprint("Unknown agent: {id}")
+            usage()
+            env.exit(2)
+        }
+        print("No supported agents detected")
+        return
+    }
+
+    let skill = match fs.read(SOURCE) {
+        Ok(text) -> text.replace("\r\n", "\n")
+        Err(e) -> {
+            eprint("Run from the installer checkout so {SOURCE} is available: {e}")
+            env.exit(1)
+        }
+    }
+    if !skill.starts_with("---\nname: puddi\n") {
+        eprint("Invalid skill source at {SOURCE}")
+        env.exit(1)
+    }
+
+    var failed = false
+    for agent in selected {
+        match apply(agent, skill, preview) {
+            Ok(message) -> print("{agent.id}: {message}")
+            Err(message) -> {
+                eprint("{agent.id}: {message}")
+                failed = true
+            }
+        }
+    }
+    if failed { env.exit(1) }
+}

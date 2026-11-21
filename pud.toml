@@ -1,0 +1,4 @@
+[package]
+name = "puddi-agent-skill"
+version = "0.1.0"
+puddi = "0.1"

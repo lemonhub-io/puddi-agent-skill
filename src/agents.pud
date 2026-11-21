@@ -1,0 +1,109 @@
+import std.env
+import std.fs
+
+pub struct Agent {
+    pub id: Str
+    pub skills: Str
+    pub detected: Bool
+}
+
+pub fn join(root: Str, name: Str) -> Str {
+    if root.ends_with("/") { root + name } else { "{root}/{name}" }
+}
+
+fn host_path(value: Str, windows: Bool) -> Str {
+    if windows { value.replace("\\", "/") } else { value }
+}
+
+fn absolute(value: Str, windows: Bool) -> Bool {
+    if !windows { return value.starts_with("/") }
+    if value.starts_with("//") { return true }
+    match value.split_once(":/") {
+        Some((drive, _)) -> drive.utf8_len() == 1 && "abcdefghijklmnopqrstuvwxyz".contains(drive.to_lower())
+        None -> false
+    }
+}
+
+pub fn home_directory() -> Option<(Str, Bool)> {
+    let home = env.get("HOME").unwrap_or("")
+    if absolute(home, false) && env.get("OS") != Some("Windows_NT") { return Some((home, false)) }
+    for candidate in [env.get("USERPROFILE").unwrap_or(""), home] {
+        let dir = host_path(candidate, true)
+        if absolute(dir, true) { return Some((dir, true)) }
+    }
+    if absolute(home, false) { Some((home, false)) } else { None }
+}
+
+fn config_path(key: Str, fallback: Str, windows: Bool) -> Str {
+    let candidate = host_path(env.get(key).unwrap_or(""), windows)
+    if absolute(candidate, windows) { candidate } else { fallback }
+}
+
+fn command_on_path(dirs: List<Str>, names: List<Str>, windows: Bool) -> Bool {
+    let suffixes = if windows { [".exe", ".cmd", ".bat", ".com", ""] } else { [""] }
+    for dir in dirs {
+        if !absolute(dir, windows) { continue }
+        for name in names {
+            for suffix in suffixes {
+                let file = join(dir, name + suffix)
+                if fs.exists(file) && !fs.is_dir(file) { return true }
+            }
+        }
+    }
+    false
+}
+
+fn agent(id: Str, root: Str, dirs: List<Str>, names: List<Str>, windows: Bool) -> Agent {
+    Agent { id, skills: join(root, "skills"), detected: fs.is_dir(root) || command_on_path(dirs, names, windows) }
+}
+
+fn vscode_copilot(home: Str) -> Bool {
+    let roots = [
+        ".vscode/extensions", ".vscode-insiders/extensions",
+        ".vscode-server/extensions", ".vscode-server-insiders/extensions",
+    ]
+    for root in roots {
+        if let Ok(entries) = fs.list_dir(join(home, root)) {
+            for entry in entries {
+                if entry.starts_with("github.copilot-chat-") || entry.starts_with("github.copilot-") {
+                    if fs.is_dir(join(join(home, root), entry)) { return true }
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn discover(home: Str, windows: Bool) -> List<Agent> {
+    let raw_dirs = env.get("PATH").unwrap_or("").split(if windows { ";" } else { ":" })
+    let dirs = raw_dirs.map(|dir| host_path(dir, windows))
+    let codex_home = config_path("CODEX_HOME", join(home, ".codex"), windows)
+    let codex = Agent {
+        id: "codex"
+        skills: join(home, ".agents/skills")
+        detected: fs.is_dir(codex_home) || command_on_path(dirs, ["codex"], windows)
+    }
+    let claude_home = config_path("CLAUDE_CONFIG_DIR", join(home, ".claude"), windows)
+    let config = config_path("XDG_CONFIG_HOME", join(home, ".config"), windows)
+    let cursor_root = join(home, ".cursor")
+    let cursor_app = !windows && (fs.is_dir("/Applications/Cursor.app") || fs.is_dir(join(home, "Applications/Cursor.app")))
+    let cursor = Agent {
+        id: "cursor"
+        skills: join(cursor_root, "skills")
+        detected: cursor_app || fs.is_dir(cursor_root) || command_on_path(dirs, ["cursor-agent", "cursor"], windows)
+    }
+    let copilot_root = join(home, ".copilot")
+    let copilot = Agent {
+        id: "copilot"
+        skills: join(copilot_root, "skills")
+        detected: fs.is_dir(copilot_root) || command_on_path(dirs, ["copilot"], windows) || vscode_copilot(home)
+    }
+    [
+        codex,
+        agent("claude", claude_home, dirs, ["claude"], windows),
+        cursor,
+        agent("gemini", join(home, ".gemini"), dirs, ["gemini"], windows),
+        agent("opencode", join(config, "opencode"), dirs, ["opencode"], windows),
+        copilot,
+    ]
+}
